@@ -391,6 +391,204 @@ if __name__ == "__main__":
     assert fourier_input[0] != fourier_input[2]
 
 # %% [markdown]
+# ## 4.1. Маленьке навчання й повторне використання параметрів
+#
+# Досі ми лише читали задані таблиці та частоти. Тепер навчимо дві маленькі
+# моделі: **E + P** (embedding-и токенів і таблиця позицій) та **E + F**
+# (embedding-и токенів і Fourier-частота). Кожна має власну таблицю E.
+# Для стислості d_model=2, словник містить два токени, позиції — 0, 1, 2.
+#
+# Навчальні приклади мають вигляд `(token_id, position, target_vector)`.
+# Це штучна задача відновлення векторів, щоб побачити оновлення параметрів;
+# вона не навчає мовної семантики або повного трансформера.
+# Усі шість пар токен/позиція є у train. Нова послідовність нижче перевіряє
+# повторне використання параметрів, а не узагальнення на невідомі пари.
+#
+# Вихід моделі: $x_{t,p}=E_t+P_p$ або $x_{t,p}=E_t+F(p;f)$.
+# Мінімізуємо середню квадратичну помилку за прикладами й координатами:
+#
+# $$L=\frac{1}{Nd}\sum_{n=1}^{N}\sum_{j=1}^{d}(x_{n,j}-y_{n,j})^2.$$
+#
+# Щоб не писати окремий backpropagation для кожної схеми, готовий helper
+# оцінює градієнт центральною різницею:
+#
+# $$g_i\approx\frac{L(\theta+\varepsilon e_i)-L(\theta-\varepsilon e_i)}
+# {2\varepsilon}.$$
+#
+# Тут e_i — одиничний вектор параметрів, не embedding токена. Метод повільний
+# для великих моделей (два обчислення loss на параметр), але зручний для цієї
+# вправи. У звичайному навчанні використовують автоматичне диференціювання.
+#
+# Параметри зберігаємо одним списком: спочатку 4 числа таблиці E (2×2),
+# потім 6 чисел таблиці P (3×2) **або** одну частоту f. Slice створює копію,
+# тому forward нижче не змінює параметри. Ініціалізація детермінована.
+
+# %%
+
+def initial_parameters(kind):
+    if kind == "table":
+        return [0.0] * 10
+    if kind == "fourier":
+        return [0.0] * 4 + [0.4]
+    raise ValueError("Невідомий тип позиційного кодування")
+
+
+def trained_vectors(token_ids, parameters, kind, start=0):
+    """Forward із поточними параметрами; навчання тут не відбувається."""
+    table = [parameters[:2], parameters[2:4]]
+    embeddings = embedding_lookup(token_ids, table)
+    if kind == "table":
+        position_table = [parameters[i:i + 2] for i in range(4, 10, 2)]
+        positions = learned_position_encoding(len(token_ids), position_table, start)
+    elif kind == "fourier":
+        positions = fourier_position_encoding(len(token_ids), parameters[4:], start)
+    else:
+        raise ValueError("Невідомий тип позиційного кодування")
+    return add_position(embeddings, positions)
+
+
+def make_training_examples():
+    from math import cos, sin
+
+    # Відомий генератор цілей потрібен тільки для цієї штучної задачі.
+    # У forward і під час повторного використання доступні лише parameters.
+    token_targets = [[0.3, -0.2], [-0.4, 0.5]]
+    return [
+        (token_id, position,
+         [base[0] + sin(position * 0.7), base[1] + cos(position * 0.7)])
+        for token_id, base in enumerate(token_targets)
+        for position in range(3)
+    ]
+
+
+def training_loss(parameters, kind, examples):
+    total = 0.0
+    for token_id, position, target in examples:
+        prediction = trained_vectors([token_id], parameters, kind, start=position)[0]
+        total += sum((actual - wanted) ** 2
+                     for actual, wanted in zip(prediction, target))
+    return total / (2 * len(examples))
+
+
+def numerical_gradient(parameters, kind, examples, epsilon=1e-5):
+    gradient = []
+    for i in range(len(parameters)):
+        plus, minus = parameters[:], parameters[:]
+        plus[i] += epsilon
+        minus[i] -= epsilon
+        gradient.append((training_loss(plus, kind, examples)
+                         - training_loss(minus, kind, examples)) / (2 * epsilon))
+    return gradient
+
+# %% [markdown]
+# ### Вправа: реалізуйте градієнтний спуск
+#
+# Допишіть `train_small_model`. Вхідні приклади — непорожній список із
+# `make_training_examples()`. На кожному кроці:
+#
+# 1. Обчисліть `numerical_gradient` для поточних параметрів.
+# 2. Оновіть **усі** параметри: theta_i ← theta_i − learning_rate × g_i.
+# 3. Додайте новий loss до історії.
+#
+# Поверніть `(parameters, losses)`, де `losses` містить також loss **до**
+# першого оновлення: всього steps+1 значень. При steps=0 поверніть початкові
+# параметри та одне значення loss. Не змінюйте приклади.
+# Вимагайте цілий steps >= 0 (не bool) та learning_rate > 0; інакше ValueError.
+# Для невідомого kind помилку вже піднімає initial_parameters.
+# Обидві моделі мають навчати E; у Fourier-моделі не забудьте оновлювати f.
+
+# %%
+
+def train_small_model(kind, examples, steps=300, learning_rate=0.3):
+    """Навчає маленькі E + P або E + F; повертає параметри та історію loss."""
+    ...
+
+
+def test_train_small_model():
+    from copy import deepcopy
+    from math import isclose
+
+    examples = make_training_examples()
+    original = deepcopy(examples)
+    for kind in ("table", "fourier"):
+        initial = initial_parameters(kind)
+        parameters, losses = train_small_model(kind, examples, steps=0)
+        assert parameters == initial
+        assert losses == [training_loss(initial, kind, examples)]
+
+        # Перевірка одного справжнього кроку, включно з позиційними параметрами.
+        gradient = numerical_gradient(initial, kind, examples)
+        parameters, losses = train_small_model(kind, examples, steps=1)
+        assert len(losses) == 2
+        assert all(isclose(value, old - 0.3 * g, abs_tol=1e-9)
+                   for value, old, g in zip(parameters, initial, gradient))
+        assert isclose(losses[-1], training_loss(parameters, kind, examples),
+                       abs_tol=1e-12)
+
+        parameters, losses = train_small_model(kind, examples)
+        assert len(parameters) == len(initial) and len(losses) == 301
+        assert losses[-1] < 1e-4
+        assert losses[-1] < losses[0] / 100
+        assert parameters[:4] != initial[:4]  # Навчили embedding-шар.
+        assert parameters[4:] != initial[4:]  # Навчили позиційні параметри.
+        assert examples == original
+
+    for steps, rate in [(-1, 0.3), (1.5, 0.3), (True, 0.3), (1, 0), (1, -0.1)]:
+        try:
+            train_small_model("table", examples, steps, rate)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Некоректні параметри навчання мають давати ValueError")
+
+
+if __name__ == "__main__":
+    test_train_small_model()
+    print("✓ train_small_model")
+
+# %% [markdown]
+# ### Повторно використовуємо навчені шари
+#
+# Готовий код нижче навчає обидва варіанти, а потім обробляє нову послідовність
+# `[1, 0, 1]` **без оновлень**. Таблиці та частоти беруться з результату
+# навчання; початкові значення більше не створюються. Такі вектори можна
+# передати наступному шару моделі. Для RoPE натомість потрібні query/key,
+# отримані проєкціями embedding-ів; E + P та E + F тут є окремими варіантами.
+
+# %%
+
+if __name__ == "__main__":
+    training_examples = make_training_examples()
+    trained_models = {}
+    for kind in ("table", "fourier"):
+        parameters, losses = train_small_model(kind, training_examples)
+        trained_models[kind] = parameters
+        print(f"{kind}: loss {losses[0]:.6f} → {losses[-1]:.6f}")
+
+    reuse_ids = [1, 0, 1]
+    for kind, parameters in trained_models.items():
+        frozen = parameters[:]
+        reused_input = trained_vectors(reuse_ids, parameters, kind)
+        assert len(reused_input) == 3 and all(len(row) == 2 for row in reused_input)
+        assert reused_input[0] != reused_input[2]
+        # start дозволяє обробити продовження з тією самою абсолютною позицією.
+        assert trained_vectors([1], parameters, kind, start=2) == [reused_input[2]]
+        assert parameters == frozen
+        print(f"{kind}, нова послідовність:", reused_input)
+
+# %% [markdown]
+# Питання та маленький експеримент:
+#
+# - Запустіть навчання з steps=0, 10 і 300. Як змінюється loss?
+# - Виведіть таблицю E до й після навчання; які рядки змінилися?
+# - Якою стала Fourier-частота? Порівняйте її з початковою 0.4 та цільовою 0.7.
+# - Чому правильні вихідні вектори не гарантують єдиного розкладу на E та P?
+#   Підказка: додайте один вектор до всіх E й відніміть його від усіх P.
+# - Спробуйте start=3: чому таблиця відхиляє позицію, а Fourier дає вектор?
+#   Чи доводить обчислення вектора його точність поза train?
+# - Де закінчується навчання і починається використання навчених параметрів?
+
+# %% [markdown]
 # ## 5. RoPE: обертання query і key
 #
 # Для позиційного кодування не обов'язково додавати щось до embedding токена.
