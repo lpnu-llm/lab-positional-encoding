@@ -5,9 +5,9 @@
 # на вектор, але однаковий токен у різних місцях отримує однаковий вектор.
 # Трансформеру також треба знати, *де* стоїть токен.
 #
-# У цій лабораторній реалізуємо позиційне кодування з нуля, використовуючи
-# лише стандартну бібліотеку Python. Потрібні знання з попередніх робіт:
-# вектори, скалярний добуток, embedding-таблиця та attention.
+# У цій лабораторній реалізуємо embedding-шар і позиційне кодування з нуля,
+# використовуючи лише стандартну бібліотеку Python. Потрібні знання з
+# попередніх робіт: вектори, скалярний добуток та attention.
 #
 # Нас цікавлять два способи передати позицію:
 #
@@ -15,6 +15,90 @@
 # 2. Повернути query та key у self-attention залежно від позицій (RoPE).
 #
 # У всіх вправах позиції починаються з нуля.
+
+# %% [markdown]
+# ## 0. Embedding-шар: від id до векторів
+#
+# Id токена — це індекс у словнику, а не числова міра його змісту: токен 4
+# не обов'язково ближчий за змістом до токена 5, ніж до токена 100.
+# Embedding-шар зберігає таблицю $E$ форми $(V, d_{\mathrm{model}})$,
+# де $V$ — кількість токенів у словнику. Для кожного id він вибирає рядок:
+#
+# $$e_p = E[\mathrm{token\_ids}[p]].$$
+#
+# Отже, список із $L$ id перетворюється на матрицю $(L, d_{\mathrm{model}})$.
+# Це пошук у таблиці, а не множення id на вектор. Таблиця містить
+# $V \times d_{\mathrm{model}}$ навчуваних параметрів; під час навчання
+# оптимізатор оновлює її значення. Тут таблиця вже задана, без тренування.
+#
+# Реалізуйте `embedding_lookup(token_ids, table)`. Повторний id має давати
+# той самий вектор незалежно від позиції. Повертайте копії рядків, щоб зміна
+# результату не змінювала таблицю або інший вихідний вектор.
+# Для некоректного id або різної довжини рядків підніміть `ValueError`.
+# Порожня таблиця дозволена лише для порожнього списку id.
+
+# %%
+
+def embedding_lookup(token_ids, table):
+    """Перетворює id токенів на копії рядків embedding-таблиці."""
+
+    # Перевірте однакову додатну довжину всіх рядків непорожньої таблиці.
+    # Кожен id має бути цілим числом (не bool) у межах 0 <= id < len(table).
+    ...
+
+
+def test_embedding_lookup():
+    table = [[1.0, 0.0], [0.0, 1.0], [0.5, -0.5]]
+    token_ids = [2, 0, 2]
+    result = embedding_lookup(token_ids, table)
+    assert result == [[0.5, -0.5], [1.0, 0.0], [0.5, -0.5]]
+    result[0][0] = 999
+    assert table[2] == [0.5, -0.5]
+    assert result[2] == [0.5, -0.5]
+    assert token_ids == [2, 0, 2]
+    assert embedding_lookup([], table) == []
+    assert embedding_lookup([], []) == []
+
+    for ids, source in [
+        ([-1], table), ([3], table), ([1.0], table), ([True], table),
+        ([0], []), ([0], [[]]), ([0], [[1.0], [2.0, 3.0]]),
+        ([], [[1.0], [2.0, 3.0]]),
+    ]:
+        try:
+            embedding_lookup(ids, source)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Некоректні id або таблиця мають давати ValueError")
+
+
+if __name__ == "__main__":
+    test_embedding_lookup()
+    print("✓ embedding_lookup")
+
+# %% [markdown]
+# Використаємо цей шар у наступних розділах. У навчальному словнику нижче
+# «кіт» має id 0, «бачить» — 1. Послідовність «кіт бачить кіт» потрібна,
+# щоб порівняти однаковий токен на різних позиціях.
+
+# %%
+
+if __name__ == "__main__":
+    token_ids = [0, 1, 0]
+    embedding_table = [
+        [1.0, 0.0, 0.5, -0.5],  # кіт
+        [0.0, 1.0, -0.5, 0.5],  # бачить
+    ]
+    token_embeddings = embedding_lookup(token_ids, embedding_table)
+    assert token_embeddings[0] == token_embeddings[2]
+    print("Embedding-и токенів:", token_embeddings)
+
+# %% [markdown]
+# Питання:
+#
+# - Яку форму має таблиця для словника з 1000 токенів і d_model=64?
+# - Яку форму матиме результат для 10 id? Скільки параметрів має сам шар?
+# - Чому однаковий токен на позиціях 0 і 2 отримав однакові вектори?
 
 # %% [markdown]
 # ## 1. Чому самого списку токенів недостатньо
@@ -143,6 +227,25 @@ if __name__ == "__main__":
 # - Навіщо під час генерації враховувати `start`, а не знову починати з нуля?
 
 # %% [markdown]
+# ### Від id до входу трансформера
+#
+# Тепер поєднайте реалізовані функції: id → embedding-шар → додавання позиції.
+# Використовуємо `token_embeddings` з розділу 0. Розмірність позицій має
+# дорівнювати довжині embedding-вектора, а кількість рядків — кількості id.
+
+# %%
+
+if __name__ == "__main__":
+    d_model = len(embedding_table[0])
+    positions = sinusoidal_encoding(len(token_ids), d_model)
+    transformer_input = add_position(token_embeddings, positions)
+    assert len(transformer_input) == len(token_ids)
+    assert all(len(row) == d_model for row in transformer_input)
+    assert token_embeddings[0] == token_embeddings[2]
+    assert transformer_input[0] != transformer_input[2]
+    print("Embedding-и з позиціями:", transformer_input)
+
+# %% [markdown]
 # ## 3. Навчувана таблиця позицій
 #
 # Інший спосіб — мати таблицю форми (max_length, d_model). Кожен рядок є
@@ -197,6 +300,22 @@ if __name__ == "__main__":
 #
 # - Які саме числа в цій таблиці змінювалися б під час навчання?
 # - Чи можна застосувати таблицю з max_length=128 до позиції 128?
+
+# %% [markdown]
+# Ту саму embedding-матрицю можна поєднати з навчуваними позиціями.
+
+# %%
+
+if __name__ == "__main__":
+    position_table = [
+        [0.1, 0.0, 0.0, 0.0],
+        [0.0, 0.1, 0.0, 0.0],
+        [0.0, 0.0, 0.1, 0.0],
+    ]
+    learned_input = add_position(
+        token_embeddings, learned_position_encoding(len(token_ids), position_table)
+    )
+    assert learned_input[0] != learned_input[2]
 
 # %% [markdown]
 # ## 4. Навчувані Fourier features
@@ -259,6 +378,17 @@ if __name__ == "__main__":
 # - Які параметри цієї схеми навчав би gradient descent?
 # - Що зміниться, якщо всі частоти дуже близькі до нуля?
 # - Чим це відрізняється від навчуваної таблиці позицій?
+
+# %% [markdown]
+# Для embedding-векторів довжини 4 потрібні дві Fourier-частоти.
+
+# %%
+
+if __name__ == "__main__":
+    fourier_input = add_position(
+        token_embeddings, fourier_position_encoding(len(token_ids), [1.0, 0.1])
+    )
+    assert fourier_input[0] != fourier_input[2]
 
 # %% [markdown]
 # ## 5. RoPE: обертання query і key
